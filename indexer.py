@@ -227,7 +227,8 @@ def get_chunk_count() -> int:
 
 def get_all_chunks() -> List[Dict]:
     """
-    Scroll through all documents, excluding embeddings (for /admin/pipeline).
+    Paginate through all documents using search_after (for /admin/pipeline).
+    OpenSearch Serverless does not support the scroll API.
     """
     try:
         client = _get_opensearch_client()
@@ -236,18 +237,17 @@ def get_all_chunks() -> List[Dict]:
         chunks = []
         body = {
             "query": {"match_all": {}},
-            "_source": {
-                "excludes": ["embedding"],
-            },
+            "_source": {"excludes": ["embedding"]},
             "size": 500,
+            "sort": [{"_doc": "asc"}],
         }
 
-        # Use scroll API for large result sets
-        response = client.search(index=index, body=body, scroll="2m")
-        scroll_id = response.get("_scroll_id")
-        hits = response["hits"]["hits"]
+        while True:
+            response = client.search(index=index, body=body)
+            hits = response["hits"]["hits"]
+            if not hits:
+                break
 
-        while hits:
             for hit in hits:
                 src = hit["_source"]
                 chunks.append({
@@ -259,14 +259,9 @@ def get_all_chunks() -> List[Dict]:
                     "page": src.get("page", 0),
                     "regions": src.get("regions", []),
                 })
-            response = client.scroll(scroll_id=scroll_id, scroll="2m")
-            hits = response["hits"]["hits"]
 
-        if scroll_id:
-            try:
-                client.clear_scroll(scroll_id=scroll_id)
-            except Exception:
-                pass
+            # Use last hit's sort value for next page
+            body["search_after"] = hits[-1]["sort"]
 
         return chunks
     except Exception as e:
