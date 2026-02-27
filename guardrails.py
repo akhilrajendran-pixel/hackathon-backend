@@ -17,7 +17,7 @@ OFF_TOPIC_PATTERNS = [
     r"\b(recipe|cook|bake|ingredient)\b",
     r"\b(write me|compose|create a story|write a)\b",
     r"\b(movie|film|song|music|lyrics)\b",
-    r"\b(sports? score|game result|who won)\b",
+    r"\b(sports? scores?|game results?|who won|cricket|football|basketball|soccer)\b",
     r"\b(news today|current events|stock price|stock market)\b",
     r"\b(translate|translation)\b",
     r"\b(code|program|debug|function|algorithm|python|javascript)\b.*\b(write|create|build|fix)\b",
@@ -25,6 +25,12 @@ OFF_TOPIC_PATTERNS = [
     r"\b(who is|what is the capital|when was .* born)\b",
     r"\b(play|game|trivia|quiz)\b",
     r"\b(horoscope|zodiac|astrology)\b",
+    r"\b(homework|assignment|exam|test prep)\b",
+    r"\bhow\s+(do|can|to)\s+.*(cook|make food|bake|pasta|recipe)\b",
+    r"\b(diet|fitness|workout|exercise|weight loss)\b",
+    r"\b(relationship|dating|love advice)\b",
+    r"\b(travel|vacation|hotel|flight|booking)\b",
+    r"\b(personal|life advice|self.help)\b",
 ]
 
 # ── Prompt injection patterns ───────────────────────────────────────────────
@@ -123,16 +129,20 @@ def _is_off_topic(query: str) -> bool:
     q_lower = query.lower()
 
     # Allow sales-adjacent keywords to pass even if they partially match off-topic
-    sales_keywords = [
-        "proposal", "case study", "whitepaper", "client", "customer",
-        "sales", "project", "engagement", "delivery", "solution",
-        "manufacturing", "digital", "transformation", "implementation",
-        "experience", "industry", "revenue", "cost", "roi",
-        "differentiator", "competitor", "outcome", "metric",
-        "pitch", "deck", "esg", "sustainability", "mes", "scada",
-        "factory", "oem", "supply chain", "analytics",
+    # Uses word boundaries to avoid false positives (e.g. "oem" inside "poem")
+    sales_patterns = [
+        r"\bproposal", r"\bcase stud", r"\bwhitepaper", r"\bclient\b", r"\bcustomer\b",
+        r"\bsales\b", r"\bproject\b", r"\bengagement\b", r"\bdelivery\b", r"\bsolution\b",
+        r"\bmanufactur", r"\bdigital\b", r"\btransformation\b", r"\bimplementation\b",
+        r"\bexperience\b", r"\bindustr", r"\brevenue\b", r"\bcost\b", r"\broi\b",
+        r"\bdifferentiator", r"\bcompetitor", r"\boutcome\b", r"\bmetric",
+        r"\bpitch\b", r"\bdeck\b", r"\besg\b", r"\bsustainab", r"\bmes\b", r"\bscada\b",
+        r"\bfactory\b", r"\boem\b", r"\bsupply chain\b", r"\banalytics\b",
+        r"\biot\b", r"\bembedded\b", r"\boffering", r"\bcapabilit",
+        r"\bengineering\b", r"\bhealthcare\b", r"\bpharma", r"\bautomotive\b",
+        r"\btelehealth\b", r"\be-mobility\b", r"\bedge\b", r"\bcloud\b",
     ]
-    if any(kw in q_lower for kw in sales_keywords):
+    if any(re.search(p, q_lower) for p in sales_patterns):
         return False
 
     for pattern in OFF_TOPIC_PATTERNS:
