@@ -1,13 +1,15 @@
 """
-LLM agent layer: prompt construction, Ollama API call, citation parsing, intent detection.
-Uses Ollama (local LLM) — no API keys required.
+LLM agent layer: prompt construction, Bedrock Converse API call, citation parsing, intent detection.
+Uses Amazon Bedrock (Claude Sonnet) for LLM inference.
 """
 import re
 import json
+import asyncio
 import logging
 from typing import Dict, List, Tuple, Optional
 
-import httpx
+import boto3
+from botocore.exceptions import ClientError
 
 import config
 import retriever
@@ -37,6 +39,22 @@ RESPONSE FORMAT:
 - End with any caveats if information is limited"""
 
 
+_bedrock_client = None
+
+
+def _get_bedrock_client():
+    """Return a cached boto3 bedrock-runtime client."""
+    global _bedrock_client
+    if _bedrock_client is None:
+        _bedrock_client = boto3.client(
+            "bedrock-runtime",
+            region_name=config.AWS_REGION,
+            aws_access_key_id=config.AWS_ACCESS_KEY_ID,
+            aws_secret_access_key=config.AWS_SECRET_ACCESS_KEY,
+        )
+    return _bedrock_client
+
+
 def _format_chunks_for_prompt(chunks: List[Dict]) -> str:
     """Format retrieved chunks as context for the LLM."""
     if not chunks:
@@ -53,47 +71,52 @@ def _format_chunks_for_prompt(chunks: List[Dict]) -> str:
     return "\n".join(lines)
 
 
-def _build_ollama_messages(
+def _build_bedrock_messages(
     query: str,
     chunks: List[Dict],
     conversation_history: List[Dict],
-) -> List[Dict]:
-    """Build the message list for Ollama chat API."""
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+) -> Tuple[List[Dict], List[Dict]]:
+    """Build the message list and system prompt for the Bedrock Converse API.
+
+    Returns (system, messages) where system is the Converse system param
+    and messages is a list of {role, content: [{text}]} dicts.
+    """
+    system = [{"text": SYSTEM_PROMPT}]
+    messages = []
 
     # Add conversation history (prior turns)
     for turn in conversation_history:
         messages.append({
             "role": turn["role"],
-            "content": turn["content"],
+            "content": [{"text": turn["content"]}],
         })
 
     # Build current user message with context
     context = _format_chunks_for_prompt(chunks)
     user_message = f"{context}\n\n=== USER QUERY ===\n{query}"
-    messages.append({"role": "user", "content": user_message})
+    messages.append({"role": "user", "content": [{"text": user_message}]})
 
-    return messages
+    return system, messages
 
 
-async def _call_ollama(messages: List[Dict]) -> str:
-    """Call Ollama chat API."""
-    url = f"{config.OLLAMA_BASE_URL}/api/chat"
-    payload = {
-        "model": config.OLLAMA_MODEL,
-        "messages": messages,
-        "stream": False,
-        "options": {
-            "temperature": 0.3,
-            "num_predict": 1024,
-        },
-    }
+async def _call_bedrock(system: List[Dict], messages: List[Dict]) -> str:
+    """Call Bedrock Converse API (sync boto3 wrapped in run_in_executor)."""
+    client = _get_bedrock_client()
 
-    async with httpx.AsyncClient(timeout=300.0) as http_client:
-        response = await http_client.post(url, json=payload)
-        response.raise_for_status()
-        data = response.json()
-        return data["message"]["content"]
+    def _invoke():
+        response = client.converse(
+            modelId=config.BEDROCK_MODEL_ID,
+            system=system,
+            messages=messages,
+            inferenceConfig={
+                "temperature": 0.3,
+                "maxTokens": 1024,
+            },
+        )
+        return response["output"]["message"]["content"][0]["text"]
+
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, _invoke)
 
 
 def _parse_intent(response_text: str) -> Tuple[str, str]:
@@ -173,7 +196,7 @@ async def process_query(
     2. Retrieve relevant chunks
     3. Compute confidence
     4. Build prompt with history
-    5. Call Ollama
+    5. Call Bedrock
     6. Parse intent + citations
     7. Check output guardrails
     8. Store turn in session
@@ -220,25 +243,26 @@ async def process_query(
 
     # 4. Build messages with conversation history
     history = session_manager.get_history_for_llm(session_id)
-    messages = _build_ollama_messages(query, chunks, history)
+    system, messages = _build_bedrock_messages(query, chunks, history)
 
-    # 5. Call Ollama
+    # 5. Call Bedrock
     try:
-        raw_answer = await _call_ollama(messages)
-    except httpx.ConnectError:
-        logger.error("Cannot connect to Ollama at %s. Is it running?", config.OLLAMA_BASE_URL)
+        raw_answer = await _call_bedrock(system, messages)
+    except ClientError as e:
+        error_code = e.response["Error"]["Code"]
+        logger.error("Bedrock API error (%s): %s", error_code, e)
         return {
             "session_id": session_id,
-            "answer": "Cannot connect to the LLM service. Please ensure Ollama is running (run 'ollama serve' in a terminal).",
+            "answer": f"LLM service error: {error_code}. Check AWS credentials and Bedrock model access.",
             "citations": [],
             "confidence": None,
             "confidence_score": None,
             "intent": None,
-            "guardrail_triggered": {"type": "system_error", "message": "Ollama not reachable. Start it with 'ollama serve'."},
+            "guardrail_triggered": {"type": "system_error", "message": f"Bedrock {error_code}: {e}"},
         }
     except Exception as e:
         import traceback
-        logger.error("Ollama API call failed: %s\n%s", e, traceback.format_exc())
+        logger.error("Bedrock API call failed: %s\n%s", e, traceback.format_exc())
         return {
             "session_id": session_id,
             "answer": f"An error occurred while processing your query: {type(e).__name__}: {e}",

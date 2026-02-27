@@ -9,5 +9,5 @@ python-pptx
 chromadb
 rank-bm25
 tiktoken
-httpx
+boto3
 pydantic

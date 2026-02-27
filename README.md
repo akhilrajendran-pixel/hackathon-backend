@@ -43,7 +43,7 @@ Sales User --> Natural Language Query --> AI Co-Pilot --> RAG + Agent --> Answer
           |           |           |           |           |
    +------+---+ +-----+----+ +---+-----+ +---+-----+ +--+--------+
    | Guardrails| |  Session  | |  Agent  | |Retriever| |  Ingest   |
-   | (input/   | |  Manager  | | (Ollama | | (Hybrid | |  Pipeline |
+   | (input/   | |  Manager  | | (Bedrock| | (Hybrid | |  Pipeline |
    |  output)  | | (in-mem)  | |  LLM)   | |  Search)| |           |
    +-----------+ +----------+ +----+----+ +----+----+ +--+--------+
                                    |           |          |
@@ -54,9 +54,9 @@ Sales User --> Natural Language Query --> AI Co-Pilot --> RAG + Agent --> Answer
                                    |      +---------+     |
                                    |                      |
                               +----+----+          +------+------+
-                              |  Ollama  |         | Drive       |
-                              | (local   |         | Connector   |
-                              |  LLM)    |         | + Extractor |
+                              | Amazon   |         | Drive       |
+                              | Bedrock  |         | Connector   |
+                              | (Claude) |         | + Extractor |
                               +---------+         | + Chunker   |
                                                    +-------------+
 ```
@@ -71,7 +71,7 @@ Sales User --> Natural Language Query --> AI Co-Pilot --> RAG + Agent --> Answer
 | Embeddings | ChromaDB default (all-MiniLM-L6-v2) | Zero config, no API key needed |
 | Vector DB | ChromaDB (local, in-process) | Zero config, no external infra |
 | Keyword Search | rank_bm25 | Handles exact terms, product names, acronyms |
-| LLM | Ollama (llama3.2, local) | No API key needed, runs locally |
+| LLM | Amazon Bedrock (Claude Sonnet) | Fast, high-quality responses via AWS |
 | Session Store | In-memory Python dict | Sufficient for hackathon; isolates sessions |
 
 ### Module Breakdown
@@ -85,7 +85,7 @@ Sales User --> Natural Language Query --> AI Co-Pilot --> RAG + Agent --> Answer
 | **Chunker** | `chunker.py` | Sentence-boundary chunking (~600 tokens) with overlap and metadata extraction (doc type, year, region) |
 | **Indexer** | `indexer.py` | ChromaDB vector index + BM25 keyword index |
 | **Retriever** | `retriever.py` | Hybrid search with metadata pre-filtering and Reciprocal Rank Fusion (RRF) |
-| **Agent** | `agent.py` | LLM prompt construction, Ollama API calls, intent detection, and citation parsing |
+| **Agent** | `agent.py` | LLM prompt construction, Bedrock Converse API calls, intent detection, and citation parsing |
 | **Guardrails** | `guardrails.py` | Input validation (PII detection, prompt injection, off-topic filtering) and output safety checks |
 | **Session Manager** | `session_manager.py` | In-memory session store with TTL expiration for multi-turn conversations |
 
@@ -146,7 +146,8 @@ When the corpus does not contain relevant information, the co-pilot explicitly s
 ## Prerequisites
 
 - **Python 3.10+**
-- **Ollama** installed and running locally with the `llama3.2` model (or any model configured in `.env`)
+- **AWS account** with Amazon Bedrock access and Claude Sonnet model enabled
+- **AWS credentials** (access key ID and secret access key) with `bedrock:InvokeModel` permission
 - **Google Drive service account** (optional -- falls back to local documents if not configured)
 
 ## Setup
@@ -180,25 +181,18 @@ Create a `.env` file in the `backend/` directory:
 GOOGLE_DRIVE_FOLDER_ID=your_folder_id_here
 SERVICE_ACCOUNT_FILE=service_account.json
 
-# Ollama LLM
-OLLAMA_BASE_URL=http://localhost:11434
-OLLAMA_MODEL=llama3.2
+# Amazon Bedrock (LLM)
+AWS_REGION=us-east-1
+AWS_ACCESS_KEY_ID=your_access_key_here
+AWS_SECRET_ACCESS_KEY=your_secret_key_here
+BEDROCK_MODEL_ID=apac.anthropic.claude-sonnet-4-20250514-v1:0
 ```
 
 If using Google Drive, place your `service_account.json` file in the `backend/` directory.
 
-### 5. Install and start Ollama
+### 5. Enable Bedrock model access
 
-```bash
-# Install Ollama (see https://ollama.com for platform-specific instructions)
-curl -fsSL https://ollama.com/install.sh | sh
-
-# Pull the model
-ollama pull llama3.2
-
-# Start the Ollama server (if not already running)
-ollama serve
-```
+In the AWS Console, navigate to **Amazon Bedrock > Model access** and request access to **Anthropic Claude Sonnet**. Access is typically granted immediately.
 
 ### 6. Add documents (local fallback)
 
@@ -360,7 +354,7 @@ Query:  "What is our experience in aerospace?"          --> "No relevant content
 | `NO_ANSWER_THRESHOLD` | 0.40 | Below this score, return "no relevant content" |
 | `SESSION_TTL_MINUTES` | 30 | Session expiration time |
 | `MAX_QUERY_LENGTH` | 1000 | Maximum allowed query length (characters) |
-| `MAX_CONCURRENT_LLM_CALLS` | 5 | Concurrency limit for Ollama API calls |
+| `MAX_CONCURRENT_LLM_CALLS` | 5 | Concurrency limit for Bedrock API calls |
 
 ## Supported Document Formats
 
@@ -392,7 +386,7 @@ backend/
 ├── chunker.py             # Text chunking with metadata extraction
 ├── indexer.py             # ChromaDB vector + BM25 keyword indexing
 ├── retriever.py           # Hybrid search with RRF fusion
-├── agent.py               # LLM agent (Ollama) with prompt engineering
+├── agent.py               # LLM agent (Bedrock / Claude) with prompt engineering
 ├── guardrails.py          # Input/output safety checks
 ├── session_manager.py     # In-memory session management
 ├── requirements.txt       # Python dependencies
