@@ -1,0 +1,13 @@
+fastapi
+uvicorn[standard]
+python-multipart
+google-api-python-client
+google-auth
+PyMuPDF
+python-docx
+python-pptx
+chromadb
+rank-bm25
+tiktoken
+httpx
+pydantic
