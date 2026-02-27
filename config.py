@@ -20,11 +20,22 @@ if _env_file.exists():
 GOOGLE_DRIVE_FOLDER_ID = os.getenv("GOOGLE_DRIVE_FOLDER_ID", "1_1Fu2G7b4FXIoRUW1Nvo04kifbpdgYh2")
 SERVICE_ACCOUNT_FILE = os.getenv("SERVICE_ACCOUNT_FILE", "service_account.json")
 
-# Amazon Bedrock (LLM)
+# AWS credentials
 AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
 AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID", "")
 AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY", "")
-BEDROCK_MODEL_ID = os.getenv("BEDROCK_MODEL_ID", "apac.anthropic.claude-sonnet-4-20250514-v1:0")
+
+# Amazon Bedrock (LLM) — can use a different region than OpenSearch
+BEDROCK_LLM_REGION = os.getenv("BEDROCK_LLM_REGION", "") or AWS_REGION
+BEDROCK_MODEL_ID = os.getenv("BEDROCK_MODEL_ID", "us.anthropic.claude-3-5-sonnet-20241022-v2:0")
+
+# Amazon Bedrock (Embeddings)
+BEDROCK_EMBED_MODEL_ID = os.getenv("BEDROCK_EMBED_MODEL_ID", "amazon.titan-embed-text-v2:0")
+EMBEDDING_DIMENSIONS = int(os.getenv("EMBEDDING_DIMENSIONS", "1024"))
+
+# Amazon OpenSearch Serverless
+OPENSEARCH_ENDPOINT = os.getenv("OPENSEARCH_ENDPOINT", "")
+OPENSEARCH_INDEX_NAME = os.getenv("OPENSEARCH_INDEX_NAME", "sales-copilot")
 
 # Chunking
 CHUNK_SIZE_TOKENS = 600        # target 500-700
@@ -50,10 +61,6 @@ MAX_QUERY_LENGTH = 1000
 
 # Concurrency
 MAX_CONCURRENT_LLM_CALLS = 5
-
-# ChromaDB
-CHROMA_PERSIST_DIR = "chroma_db"
-CHROMA_COLLECTION_NAME = "sales_copilot"
 
 # Local fallback
 LOCAL_DOCS_DIR = "local_docs"

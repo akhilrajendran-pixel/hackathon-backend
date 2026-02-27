@@ -48,7 +48,7 @@ def _get_bedrock_client():
     if _bedrock_client is None:
         _bedrock_client = boto3.client(
             "bedrock-runtime",
-            region_name=config.AWS_REGION,
+            region_name=config.BEDROCK_LLM_REGION,
             aws_access_key_id=config.AWS_ACCESS_KEY_ID,
             aws_secret_access_key=config.AWS_SECRET_ACCESS_KEY,
         )

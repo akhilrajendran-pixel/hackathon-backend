@@ -49,8 +49,8 @@ Sales User --> Natural Language Query --> AI Co-Pilot --> RAG + Agent --> Answer
                                    |           |          |
                                    |      +----+----+     |
                                    |      | Indexer  |     |
-                                   |      | ChromaDB |     |
-                                   |      | + BM25   |     |
+                                   |      |OpenSearch|     |
+                                   |      |Serverless|     |
                                    |      +---------+     |
                                    |                      |
                               +----+----+          +------+------+
@@ -68,9 +68,8 @@ Sales User --> Natural Language Query --> AI Co-Pilot --> RAG + Agent --> Answer
 | API Framework | FastAPI + Uvicorn | Async support, easy to build, auto-docs |
 | Google Drive | google-api-python-client + service account | Read-only access to shared folder |
 | Text Extraction | PyMuPDF (PDF), python-docx (DOCX), python-pptx (PPTX) | Covers all expected file types |
-| Embeddings | ChromaDB default (all-MiniLM-L6-v2) | Zero config, no API key needed |
-| Vector DB | ChromaDB (local, in-process) | Zero config, no external infra |
-| Keyword Search | rank_bm25 | Handles exact terms, product names, acronyms |
+| Embeddings | Bedrock Titan Embed v2 (1024-dim) | High-quality AWS-native embeddings |
+| Vector + Keyword DB | Amazon OpenSearch Serverless | Persistent kNN vectors + BM25 in one managed service |
 | LLM | Amazon Bedrock (Claude Sonnet) | Fast, high-quality responses via AWS |
 | Session Store | In-memory Python dict | Sufficient for hackathon; isolates sessions |
 
@@ -83,8 +82,8 @@ Sales User --> Natural Language Query --> AI Co-Pilot --> RAG + Agent --> Answer
 | **Drive Connector** | `drive_connector.py` | Google Drive file listing and download with local fallback |
 | **Extractor** | `extractor.py` | PDF / DOCX / PPTX text extraction using PyMuPDF, python-docx, python-pptx |
 | **Chunker** | `chunker.py` | Sentence-boundary chunking (~600 tokens) with overlap and metadata extraction (doc type, year, region) |
-| **Indexer** | `indexer.py` | ChromaDB vector index + BM25 keyword index |
-| **Retriever** | `retriever.py` | Hybrid search with metadata pre-filtering and Reciprocal Rank Fusion (RRF) |
+| **Indexer** | `indexer.py` | OpenSearch Serverless vector + keyword indexing with Bedrock Titan Embed v2 |
+| **Retriever** | `retriever.py` | Hybrid search (kNN + BM25) via OpenSearch with metadata pre-filtering and RRF |
 | **Agent** | `agent.py` | LLM prompt construction, Bedrock Converse API calls, intent detection, and citation parsing |
 | **Guardrails** | `guardrails.py` | Input validation (PII detection, prompt injection, off-topic filtering) and output safety checks |
 | **Session Manager** | `session_manager.py` | In-memory session store with TTL expiration for multi-turn conversations |
@@ -107,8 +106,8 @@ The system classifies each query into one of these intents:
 
 ### 3. Hybrid Search (Semantic + Keyword)
 Pure vector search struggles with exact terms like product names, client codes, or acronyms. The system combines:
-- **Vector search** (ChromaDB with cosine similarity) for semantic understanding
-- **BM25 keyword search** for exact term matching
+- **Vector search** (OpenSearch kNN with Bedrock Titan Embed v2) for semantic understanding
+- **BM25 keyword search** (OpenSearch native) for exact term matching
 - **Reciprocal Rank Fusion (RRF)** to merge both result sets: `score = sum(1 / (k + rank))`
 - **Metadata pre-filtering** -- queries like "proposals from 2023" or "case studies in South India" trigger metadata filters before search
 
@@ -146,8 +145,9 @@ When the corpus does not contain relevant information, the co-pilot explicitly s
 ## Prerequisites
 
 - **Python 3.10+**
-- **AWS account** with Amazon Bedrock access and Claude Sonnet model enabled
-- **AWS credentials** (access key ID and secret access key) with `bedrock:InvokeModel` permission
+- **AWS account** with Amazon Bedrock access (Claude Sonnet + Titan Embed v2) and OpenSearch Serverless
+- **AWS credentials** (access key ID and secret access key) with `bedrock:InvokeModel` and `aoss:APIAccessAll` permissions
+- **Amazon OpenSearch Serverless collection** (vector search type) named `sales-copilot`
 - **Google Drive service account** (optional -- falls back to local documents if not configured)
 
 ## Setup
@@ -181,20 +181,36 @@ Create a `.env` file in the `backend/` directory:
 GOOGLE_DRIVE_FOLDER_ID=your_folder_id_here
 SERVICE_ACCOUNT_FILE=service_account.json
 
-# Amazon Bedrock (LLM)
+# Amazon Bedrock (LLM + Embeddings)
 AWS_REGION=us-east-1
 AWS_ACCESS_KEY_ID=your_access_key_here
 AWS_SECRET_ACCESS_KEY=your_secret_key_here
 BEDROCK_MODEL_ID=apac.anthropic.claude-sonnet-4-20250514-v1:0
+BEDROCK_EMBED_MODEL_ID=amazon.titan-embed-text-v2:0
+
+# Amazon OpenSearch Serverless
+OPENSEARCH_ENDPOINT=https://xxxxxxxxxx.us-east-1.aoss.amazonaws.com
+OPENSEARCH_INDEX_NAME=sales-copilot
 ```
 
 If using Google Drive, place your `service_account.json` file in the `backend/` directory.
 
 ### 5. Enable Bedrock model access
 
-In the AWS Console, navigate to **Amazon Bedrock > Model access** and request access to **Anthropic Claude Sonnet**. Access is typically granted immediately.
+In the AWS Console, navigate to **Amazon Bedrock > Model access** and request access to:
+- **Anthropic Claude Sonnet** (for LLM)
+- **Amazon Titan Embed Text v2** (for embeddings)
 
-### 6. Add documents (local fallback)
+### 6. Set up OpenSearch Serverless
+
+1. Go to **Amazon OpenSearch Service > Serverless > Create collection**
+2. Name: `sales-copilot`, Type: **Vector search**
+3. Configure a **Network policy** (Public access for development)
+4. Configure a **Data access policy** granting your IAM user permissions on `index/sales-copilot/*`
+5. Add `aoss:APIAccessAll` to your IAM user's policy
+6. Copy the collection endpoint URL into your `.env` as `OPENSEARCH_ENDPOINT`
+
+### 7. Add documents (local fallback)
 
 If not using Google Drive, place your PDF, DOCX, or PPTX files in the `backend/local_docs/` directory:
 
@@ -384,16 +400,15 @@ backend/
 ├── drive_connector.py     # Google Drive + local file connector
 ├── extractor.py           # Document text extraction (PDF/DOCX/PPTX)
 ├── chunker.py             # Text chunking with metadata extraction
-├── indexer.py             # ChromaDB vector + BM25 keyword indexing
-├── retriever.py           # Hybrid search with RRF fusion
+├── indexer.py             # OpenSearch Serverless vector + keyword indexing
+├── retriever.py           # Hybrid search (kNN + BM25) with RRF fusion
 ├── agent.py               # LLM agent (Bedrock / Claude) with prompt engineering
 ├── guardrails.py          # Input/output safety checks
 ├── session_manager.py     # In-memory session management
 ├── requirements.txt       # Python dependencies
 ├── service_account.json   # Google Drive credentials (not committed)
 ├── .env                   # Environment variables (not committed)
-├── local_docs/            # Local document fallback directory
-└── chroma_db/             # ChromaDB persistent storage
+└── local_docs/            # Local document fallback directory
 ```
 
 ## CORS Configuration

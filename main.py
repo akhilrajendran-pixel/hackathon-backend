@@ -33,6 +33,7 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)-7s | %(name)s | %(message)s",
 )
 logger = logging.getLogger("sales_copilot")
+logger.info("Bedrock LLM model: %s (region: %s)", config.BEDROCK_MODEL_ID, config.BEDROCK_LLM_REGION)
 
 # ── App ─────────────────────────────────────────────────────────────────────
 app = FastAPI(
@@ -119,9 +120,13 @@ class HealthResponse(BaseModel):
 @app.get("/health", response_model=HealthResponse)
 async def health():
     """Simple health check."""
+    try:
+        count = indexer.get_chunk_count()
+    except Exception:
+        count = 0
     return {
         "status": "ok",
-        "indexed_chunks": indexer.get_chunk_count(),
+        "indexed_chunks": count,
     }
 
 

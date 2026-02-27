@@ -6,8 +6,8 @@ google-auth
 PyMuPDF
 python-docx
 python-pptx
-chromadb
-rank-bm25
+opensearch-py
+requests-aws4auth
 tiktoken
 boto3
 pydantic

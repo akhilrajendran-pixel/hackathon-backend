@@ -1,5 +1,5 @@
 """
-Hybrid search: vector (ChromaDB) + keyword (BM25) with Reciprocal Rank Fusion.
+Hybrid search: vector (OpenSearch kNN) + keyword (OpenSearch BM25) with Reciprocal Rank Fusion.
 Includes metadata pre-filtering and confidence scoring.
 """
 import re
@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 def _extract_metadata_filters(query: str) -> Dict:
     """
     Parse the query for explicit metadata cues (year, doc_type, region).
-    Returns a dict of ChromaDB where-filters.
+    Returns a dict of filter values.
     """
     filters = {}
     q_lower = query.lower()
@@ -53,96 +53,126 @@ def _extract_metadata_filters(query: str) -> Dict:
     return filters
 
 
-def _build_chroma_where(filters: Dict) -> Optional[Dict]:
-    """Convert our filter dict into ChromaDB where clause."""
+def _build_opensearch_filter(filters: Dict) -> Optional[Dict]:
+    """Convert our filter dict into an OpenSearch bool filter clause."""
     conditions = []
+
     if "year" in filters:
-        conditions.append({"year": {"$eq": filters["year"]}})
+        conditions.append({"term": {"year": filters["year"]}})
     if "doc_type" in filters:
-        conditions.append({"doc_type": {"$eq": filters["doc_type"]}})
+        conditions.append({"term": {"doc_type": filters["doc_type"]}})
     if "region" in filters:
-        conditions.append({"regions": {"$contains": filters["region"]}})
+        conditions.append({"term": {"regions": filters["region"]}})
 
     if not conditions:
         return None
     if len(conditions) == 1:
         return conditions[0]
-    return {"$and": conditions}
+    return {"bool": {"must": conditions}}
 
 
 # ── Vector search ───────────────────────────────────────────────────────────
 
-def _vector_search(query: str, where: Optional[Dict], top_k: int) -> List[Tuple[str, float]]:
+def _vector_search(query: str, os_filter: Optional[Dict], top_k: int) -> List[Tuple[str, float]]:
     """
-    Query ChromaDB. Returns list of (chunk_id, distance_score).
-    ChromaDB cosine distance: 0 = identical, 2 = opposite.
-    We convert to similarity: sim = 1 - dist/2.
+    OpenSearch kNN search. Returns list of (chunk_id, similarity_score).
+    Cosinesimil scores are already in [0, 1] range.
     """
-    collection = indexer.get_collection()
-    if collection is None:
+    client = indexer.get_collection()
+    if client is None:
         return []
 
-    # Use query_texts so ChromaDB auto-embeds with its default function
-    kwargs = {
-        "query_texts": [query],
-        "n_results": top_k,
-        "include": ["distances"],
+    query_vector = indexer.embed_query(query)
+
+    knn_body = {
+        "size": top_k,
+        "query": {
+            "knn": {
+                "embedding": {
+                    "vector": query_vector,
+                    "k": top_k,
+                }
+            }
+        },
+        "_source": ["chunk_id"],
     }
-    if where:
-        kwargs["where"] = where
+
+    # Add filter if present
+    if os_filter:
+        knn_body["query"]["knn"]["embedding"]["filter"] = os_filter
 
     try:
-        results = collection.query(**kwargs)
+        results = client.search(index=config.OPENSEARCH_INDEX_NAME, body=knn_body)
     except Exception as e:
-        logger.warning("ChromaDB query with filter failed (%s), retrying without filter", e)
-        kwargs.pop("where", None)
-        results = collection.query(**kwargs)
-
-    ids = results["ids"][0] if results["ids"] else []
-    distances = results["distances"][0] if results["distances"] else []
+        logger.warning("OpenSearch kNN query with filter failed (%s), retrying without filter", e)
+        knn_body["query"]["knn"]["embedding"].pop("filter", None)
+        results = client.search(index=config.OPENSEARCH_INDEX_NAME, body=knn_body)
 
     scored = []
-    for cid, dist in zip(ids, distances):
-        similarity = 1.0 - dist / 2.0  # cosine distance → similarity
-        scored.append((cid, similarity))
+    for hit in results["hits"]["hits"]:
+        chunk_id = hit["_source"]["chunk_id"]
+        score = hit["_score"]  # cosinesimil: higher is more similar
+        scored.append((chunk_id, score))
 
     return scored
 
 
 # ── BM25 search ─────────────────────────────────────────────────────────────
 
-def _bm25_search(query: str, filters: Dict, top_k: int) -> List[Tuple[str, float]]:
+def _bm25_search(query: str, os_filter: Optional[Dict], top_k: int) -> List[Tuple[str, float]]:
     """
-    Query BM25 index. Returns list of (chunk_id, bm25_score).
+    OpenSearch BM25 keyword search on the 'text' field.
     Scores are normalized to [0, 1] range.
     """
-    bm25, chunks = indexer.get_bm25()
-    if bm25 is None or not chunks:
+    client = indexer.get_collection()
+    if client is None:
         return []
 
-    tokenized_query = query.lower().split()
-    raw_scores = bm25.get_scores(tokenized_query)
+    # Build query body
+    if os_filter:
+        search_body = {
+            "size": top_k,
+            "query": {
+                "bool": {
+                    "must": {"match": {"text": query}},
+                    "filter": os_filter if isinstance(os_filter, list) else [os_filter],
+                }
+            },
+            "_source": ["chunk_id"],
+        }
+    else:
+        search_body = {
+            "size": top_k,
+            "query": {
+                "match": {"text": query}
+            },
+            "_source": ["chunk_id"],
+        }
 
-    # Apply metadata filters manually
+    try:
+        results = client.search(index=config.OPENSEARCH_INDEX_NAME, body=search_body)
+    except Exception as e:
+        logger.warning("OpenSearch BM25 query failed (%s), retrying without filter", e)
+        search_body = {
+            "size": top_k,
+            "query": {"match": {"text": query}},
+            "_source": ["chunk_id"],
+        }
+        results = client.search(index=config.OPENSEARCH_INDEX_NAME, body=search_body)
+
+    hits = results["hits"]["hits"]
+    if not hits:
+        return []
+
+    # Normalize scores to [0, 1]
+    max_score = hits[0]["_score"] if hits[0]["_score"] > 0 else 1.0
     scored = []
-    for i, score in enumerate(raw_scores):
-        chunk = chunks[i]
-        if "year" in filters and chunk.get("year") != filters["year"]:
-            continue
-        if "doc_type" in filters and chunk.get("doc_type") != filters["doc_type"]:
-            continue
-        if "region" in filters:
-            if filters["region"] not in chunk.get("regions", []):
-                continue
-        scored.append((chunk["chunk_id"], score))
+    for hit in hits:
+        chunk_id = hit["_source"]["chunk_id"]
+        normalized = hit["_score"] / max_score
+        scored.append((chunk_id, normalized))
 
-    # Normalize
-    if scored:
-        max_score = max(s for _, s in scored) or 1.0
-        scored = [(cid, s / max_score) for cid, s in scored]
-
-    scored.sort(key=lambda x: x[1], reverse=True)
-    return scored[:top_k]
+    return scored
 
 
 # ── Reciprocal Rank Fusion ──────────────────────────────────────────────────
@@ -173,8 +203,8 @@ def retrieve(query: str, top_k: int = config.FINAL_TOP_K) -> List[Dict]:
     """
     Full hybrid retrieval pipeline:
     1. Extract metadata filters from query
-    2. Vector search (ChromaDB)
-    3. BM25 keyword search
+    2. Vector search (OpenSearch kNN)
+    3. BM25 keyword search (OpenSearch match)
     4. RRF fusion
     5. Return top-k results with full metadata
 
@@ -183,46 +213,68 @@ def retrieve(query: str, top_k: int = config.FINAL_TOP_K) -> List[Dict]:
     """
     # Step 1: metadata pre-filter
     filters = _extract_metadata_filters(query)
-    chroma_where = _build_chroma_where(filters)
+    os_filter = _build_opensearch_filter(filters)
     logger.info("Query filters: %s", filters)
 
     # Step 2: vector search
-    vector_results = _vector_search(query, chroma_where, config.VECTOR_TOP_K)
+    vector_results = _vector_search(query, os_filter, config.VECTOR_TOP_K)
 
     # Step 3: BM25 search
-    bm25_results = _bm25_search(query, filters, config.BM25_TOP_K)
+    bm25_results = _bm25_search(query, os_filter, config.BM25_TOP_K)
 
     # Step 4: RRF fusion
     fused = _reciprocal_rank_fusion(vector_results, bm25_results)
 
-    # Build chunk lookup
-    all_chunks = indexer.get_all_chunks()
-    chunk_map = {c["chunk_id"]: c for c in all_chunks}
-
-    # Also get vector similarity scores for confidence calculation
+    # Build score lookup from vector results for confidence
     vector_score_map = {cid: score for cid, score in vector_results}
 
-    # Step 5: assemble top-k results
+    # Fetch full documents for the fused top-k chunk IDs
+    client = indexer.get_collection()
+    if client is None:
+        return []
+
+    # Get top candidate IDs
+    top_ids = [cid for cid, _ in fused[:top_k * 2]]  # fetch extra in case some miss
+
+    # Batch fetch from OpenSearch using terms query on chunk_id field
     results = []
+    doc_map = {}
+    if top_ids:
+        try:
+            fetch_response = client.search(
+                index=config.OPENSEARCH_INDEX_NAME,
+                body={
+                    "query": {"terms": {"chunk_id": top_ids}},
+                    "_source": {"excludes": ["embedding"]},
+                    "size": len(top_ids),
+                },
+            )
+            for hit in fetch_response["hits"]["hits"]:
+                src = hit["_source"]
+                doc_map[src["chunk_id"]] = src
+        except Exception as e:
+            logger.warning("Batch fetch failed: %s", e)
+            doc_map = {}
+
+    # Step 5: assemble top-k results
     for chunk_id, rrf_score in fused[:top_k]:
-        chunk = chunk_map.get(chunk_id)
-        if not chunk:
+        src = doc_map.get(chunk_id)
+        if not src:
             continue
 
-        # Use vector similarity as the relevance score (more interpretable)
         vec_score = vector_score_map.get(chunk_id, 0.0)
 
         results.append({
             "chunk_id": chunk_id,
-            "chunk_text": chunk["chunk_text"],
-            "filename": chunk["filename"],
-            "doc_type": chunk["doc_type"],
-            "year": chunk.get("year"),
-            "page": chunk["page"],
-            "regions": chunk.get("regions", []),
+            "chunk_text": src.get("text", ""),
+            "filename": src["filename"],
+            "doc_type": src["doc_type"],
+            "year": src.get("year"),
+            "page": src.get("page", 0),
+            "regions": src.get("regions", []),
             "relevance_score": round(vec_score, 4),
             "rrf_score": round(rrf_score, 4),
-            "drive_link": indexer.get_drive_link(chunk["filename"]),
+            "drive_link": indexer.get_drive_link(src["filename"]),
         })
 
     logger.info("Retrieved %d chunks for query (filters=%s)", len(results), filters)
