@@ -167,15 +167,26 @@ def _ext_to_mime(ext: str) -> str:
 # ── Unified interface ───────────────────────────────────────────────────────
 
 def list_files() -> List[Dict]:
-    """Try Google Drive first; fall back to local_docs/."""
-    if config.GOOGLE_DRIVE_FOLDER_ID and os.path.exists(config.SERVICE_ACCOUNT_FILE):
-        try:
-            files = list_drive_files()
-            if files:
-                return files
-            logger.warning("Drive returned 0 files, falling back to local docs")
-        except Exception as e:
-            logger.warning("Drive listing failed (%s), falling back to local docs", e)
+    """Pull from all configured Drive folders; fall back to local_docs/."""
+    if config.GOOGLE_DRIVE_FOLDER_IDS and os.path.exists(config.SERVICE_ACCOUNT_FILE):
+        all_files = []
+        for folder_id in config.GOOGLE_DRIVE_FOLDER_IDS:
+            try:
+                files = list_drive_files(folder_id)
+                all_files.extend(files)
+            except Exception as e:
+                logger.warning("Drive folder %s not accessible, skipping (%s)", folder_id, e)
+        if all_files:
+            # Deduplicate by file id
+            seen = set()
+            unique = []
+            for f in all_files:
+                if f["id"] not in seen:
+                    seen.add(f["id"])
+                    unique.append(f)
+            logger.info("Total files from %d Drive folder(s): %d", len(config.GOOGLE_DRIVE_FOLDER_IDS), len(unique))
+            return unique
+        logger.warning("All Drive folders returned 0 files, falling back to local docs")
     return list_local_files()
 
 

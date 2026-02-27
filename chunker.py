@@ -66,7 +66,12 @@ def _extract_doc_type(filename: str) -> str:
         return "pitch_deck"
     if any(kw in fn for kw in ("offering", "services", "overview", "corp overview",
                                 "engineering stack", "delivery model",
-                                "execution", "governance")):
+                                "execution", "governance", "engineering",
+                                "monitoring", "analytics", "platform",
+                                "medical device", "e-mobility", "edge",
+                                "remote", "radar", "robotic", "drone",
+                                "pharma", "telehealth", "iot", "ai",
+                                "product engineering")):
         return "service_presentation"
     # Check file extension for whitepapers (docx files are typically whitepapers in this corpus)
     if fn.endswith(".docx"):

@@ -222,6 +222,12 @@ def retrieve(query: str, top_k: int = config.FINAL_TOP_K) -> List[Dict]:
     # Step 3: BM25 search
     bm25_results = _bm25_search(query, os_filter, config.BM25_TOP_K)
 
+    # Fallback: if filters returned nothing, retry without filters
+    if not vector_results and not bm25_results and os_filter:
+        logger.info("Filtered search returned 0 results, retrying without filters")
+        vector_results = _vector_search(query, None, config.VECTOR_TOP_K)
+        bm25_results = _bm25_search(query, None, config.BM25_TOP_K)
+
     # Step 4: RRF fusion
     fused = _reciprocal_rank_fusion(vector_results, bm25_results)
 
